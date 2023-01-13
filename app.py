@@ -1,10 +1,21 @@
+import nltk.tokenize
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import time
-import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
 import re
 from langdetect import detect
 from googletrans import Translator
+from sklearn import metrics
+from sklearn.feature_extraction.text import TfidfTransformer
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import SGDClassifier
+from sklearn.naive_bayes import ComplementNB
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.ensemble import RandomForestClassifier
 
 s_time = time.time()
 train_data = pd.read_csv("assignment-comp3222-comp6246-mediaeval2015-dataset/mediaeval-2015-trainingset.txt",
@@ -83,31 +94,145 @@ def translate_to_english(string):
     return string
 
 
+def remove_whitespace(string):
+    return " ".join(string.split())
+
+
+def remove_at_username(string):
+    string = re.sub(r'@\w*', "", string)
+    return string
+
+
+def lemmatising(string):
+    tokenizer = nltk.tokenize.WhitespaceTokenizer()
+    lemmatizer = nltk.stem.WordNetLemmatizer()
+    return " ".join([lemmatizer.lemmatize(x) for x in tokenizer.tokenize(string)])
+
+
 def preprocess(string):
+    string = string.lower()
     string = remove_emoji(string)
     string = remove_URLs(string)
-    # string = translate_to_english(string)
+    string = remove_at_username(string)
     string = remove_special_char(string)
+    string = remove_whitespace(string)
     return string
 
 
 train_df["cleanedText"] = train_df["tweetText"].apply(preprocess)
 test_df["cleanedText"] = test_df["tweetText"].apply(preprocess)
 
-# remove duplicate posts
+# remove duplicate posts and remove empty text rows
 train_df.drop_duplicates(subset=["cleanedText"], keep="first", inplace=True, ignore_index=False)
+train_df["cleanedText"].replace("", np.nan, inplace=True)
+train_df.dropna(subset=["cleanedText"], inplace=True)
+test_df.drop_duplicates(subset=["cleanedText"], keep="first", inplace=True, ignore_index=False)
+test_df["cleanedText"].replace("", np.nan, inplace=True)
+test_df.dropna(subset=["cleanedText"], inplace=True)
 
 # remove stopwords
 stopwords = nltk.corpus.stopwords.words()
-stopwords.extend([':', ';', '[', ']', '"', "'", '(', ')', '.', '?', '#', '@', '...'])
+stopwords.extend([':', ';', '[', ']', '"', "'", '(', ')', '.', '?', '#', '@', '...', '!', ',', '/', ])
 def remove_stopwords(string):
-    result = ' '.join([w for w in string.split() if w not in stopwords])
+    word_tokens = word_tokenize(string)
+    filtered_sent = [w for w in word_tokens if not w.lower() in stopwords]
+    result = " ".join(filtered_sent)
     return result
 
 
+def count_hashtags(string):
+    count = 0
+    for hash_tag in re.findall('#(\w+)', string):
+        count += 1
+    return str(count)
+
+
+train_df["num_hashtags"] = train_df["cleanedText"].apply(count_hashtags)
 train_df["cleanedText"] = train_df["cleanedText"].apply(remove_stopwords)
-train_df["length"] = train_df["cleanedText"].str.len()
-# train_df.to_csv("train_data1.csv", index=None)
-print(train_df["length"].min())
+train_df["cleanedText"] = train_df["cleanedText"].apply(lemmatising)
+train_df["cleanedText"] = train_df["cleanedText"].apply(remove_whitespace)
+train_df["textLength"] = train_df["cleanedText"].str.len()
+train_df["textLength"] = [str(length) for length in train_df["textLength"]]
+train_df["language"] = train_df["cleanedText"].apply(lambda text: detect(text))
+
+test_df["num_hashtags"] = test_df["cleanedText"].apply(count_hashtags)
+test_df["cleanedText"] = test_df["cleanedText"].apply(remove_stopwords)
+test_df["cleanedText"] = test_df["cleanedText"].apply(lemmatising)
+test_df["cleanedText"] = test_df["cleanedText"].apply(remove_whitespace)
+test_df["textLength"] = test_df["cleanedText"].str.len()
+test_df["textLength"] = [str(length) for length in test_df["textLength"]]
+test_df["language"] = test_df["cleanedText"].apply(lambda text: detect(text))
+train_df.to_csv("train_data1.csv", index=None)
+test_df.to_csv("test_data1.csv", index=None)
+
+labels_train = train_df["label"]
+features_train = train_df["cleanedText"] + " " + \
+                 train_df["num_hashtags"] + " " + \
+                 train_df["language"] + " " + train_df["username"] + " " + train_df["timestamp"]
+labels_test = test_df["label"]
+features_test = test_df["cleanedText"] + " " + \
+                test_df["num_hashtags"] + " " + \
+                test_df["language"] + " " + test_df["username"] + " " + test_df["timestamp"]
+
+
+# Function to calculate F1 score
+def calculate_F1(labels_test, pred):
+    tp = 0
+    fp = 0
+    tn = 0
+    fn = 0
+    for truth, pred in zip(labels_test, pred):
+        if truth == 0 and pred == 0:
+            tp += 1
+        if truth == 1 and pred == 0:
+            fp += 1
+        if truth == 1 and pred == 1:
+            tn += 1
+        if truth == 0 and pred == 1:
+            fn += 1
+    precision = tp / (tp + fp)
+    recall = tp / (tp + fn)
+    f1 = 2 * precision * recall / (precision + recall)
+    return f1
+
+
+# TF-IDF + RF
+tfidf_vectorizer = TfidfVectorizer(stop_words="english")
+tfidf_train = tfidf_vectorizer.fit_transform(features_train)
+tfidf_test = tfidf_vectorizer.transform(features_test)
+rf_clf = RandomForestClassifier()
+rf_clf.fit(tfidf_train, labels_train)
+rf_pred = rf_clf.predict(tfidf_test)
+print("TF-IDF + RF f1:", calculate_F1(labels_test, rf_pred))
+
+# TF-IDF + MNB
+mnb_clf = MultinomialNB()
+mnb_clf.fit(tfidf_train, labels_train)
+cnb_pred = mnb_clf.predict(tfidf_test)
+print("TF-IDF + MNB f1:", calculate_F1(labels_test, cnb_pred))
+
+# TF-IDF + SGD
+sgd_clf = SGDClassifier()
+sgd_clf.fit(tfidf_train, labels_train)
+sgd_pred = sgd_clf.predict(tfidf_test)
+print("TF-IDF + SGD f1:", calculate_F1(labels_test, sgd_pred))
+
+# n-grams + RF
+n_gram_vectorizer = CountVectorizer(analyzer="char_wb", ngram_range=(2, 2))
+n_gram_train = n_gram_vectorizer.fit_transform(features_train)
+n_gram_test = n_gram_vectorizer.transform(features_test)
+rf_clf.fit(n_gram_train, labels_train)
+rf_pred = rf_clf.predict(n_gram_test)
+print("n-grams + RF f1:", calculate_F1(labels_test, rf_pred))
+
+# n-grams + MNB
+mnb_clf.fit(n_gram_train, labels_train)
+cnb_pred = mnb_clf.predict(n_gram_test)
+print("n-grams + MNB f1:", calculate_F1(labels_test, cnb_pred))
+
+# n-grams + SGB
+sgd_clf.fit(n_gram_train, labels_train)
+sgd_pred = sgd_clf.predict(n_gram_test)
+print("n-grams + SGB f1:", calculate_F1(labels_test, sgd_pred))
 e_time = time.time()
 print("Processing: " + str(e_time - s_time) + 's')
